@@ -1,0 +1,225 @@
+CON
+    VGA_BASE_PIN  = 40
+    VGA_VSYNC_PIN = VGA_BASE_PIN + 4
+
+    LINEBUFSIZE = 80 * 4
+    SCREENSIZE  = 80 * 30
+
+OBJ
+    disk: "disk.spin"
+    memory: "memory.spin"
+    'ps2: "ps2.spin"
+    text: "p2textdrv.spin2"
+    usb: "usbnew.spin2" | DEBUG_DISABLE = true, USB_BASE_PIN = 16, USB_ENABLE_OFFSET = -1, ERROR_LED = 56, HAVE_MOUSE = false, KEYQUEUE_SIZE = 32, RPI_KEYBOARD_NUMLOCK_HACK = false
+
+VAR
+    long region[12]
+    long display[14]
+
+    long diskBufferPointer
+
+    byte readState
+    byte printState
+    byte printMode
+    byte param0
+    byte color
+    byte ret0
+    byte ret1
+
+PUB Initialize()
+    text.InitVga(-1, VGA_BASE_PIN, VGA_VSYNC_PIN, 0, text#VGA)
+    color := $F0
+    text.SetTextColours(color >> 4, color & $F)
+    text.Clear
+    usb.Start
+    disk.Initialize
+    readState := 0
+    printState := 0
+
+PUB GetRamAddr(): r
+    return memory.GetRamAddr
+
+PUB Read(port): r | temp
+    case port
+        $00000000:
+            if readState == 1
+                readState := 2
+                return ret0
+            if readState == 2
+                readState := 0
+                return ret1
+            if temp := usb.get_key
+                if temp := Scan2Ascii(temp)
+                    return temp
+        $80001000..$80001003:
+            return disk.Size(port & $0F)
+        $80002000..$80002003:
+            return diskBufferPointer
+    return 0
+
+PUB Write(port, value) | i, temp
+    case port
+        $00000000:
+            value := ConvertChar(value & $FF)
+            if value <> 0
+                DebugChar(value)
+        $80002000..$80002003:
+            diskBufferPointer := value
+        $80003000..$80003003:
+            disk.Seek(port & $0F, value)
+            temp := disk.Read(port & $0F)
+            repeat i from 0 to 511
+                WriteByte(diskBufferPointer + i, byte[temp + i])
+        $80004000..$80004003:
+            disk.Seek(port & $0F, value)
+            repeat i from 0 to 511
+                disk.WriteBuffer(i, ReadByte(diskBufferPointer + i))
+            disk.Write(port & $0F)
+            disk.Sync(port & $0F)
+
+PUB ReadByte(address): r
+    return memory.ReadByte(address)
+PUB ReadHalf(address): r
+    return memory.ReadHalf(address)
+PUB ReadWord(address): r
+    return memory.ReadWord(address)
+PUB WriteByte(address, value)
+    memory.WriteByte(address, value)
+PUB WriteHalf(address, value)
+    memory.WriteHalf(address, value)
+PUB WriteWord(address, value)
+    memory.WriteWord(address, value)
+
+PUB DebugChar(c)
+    text.Out(c)
+PUB DebugHex(h, digits)
+    text.Hex(h, digits)
+    DebugChar(" ")
+PUB DebugStr(s)
+    text.PrintStr(s)
+
+PUB ConvertChar(c): r | row, col
+    case printState
+        1:
+            param0 := c
+            printState := 2
+        2:
+            case printMode
+                $EE:
+                    ' return a two-byte parameter
+                    if (param0 == 0) and (c == 0)
+                        ret0 := text.GetCurrentColumns
+                        ret1 := text.GetCurrentRows
+                        readState := 1
+                $F0:
+                    ' fill
+                    wordfill(text.GetScreenBuffer, ((color & $F) << 4) | (color & $F) | param0, text.GetCurrentRows * text.GetCurrentColumns)
+                $F1:
+                    ' move cursor
+                    text.SetTextPos(c, param0)
+                $F2:
+                    ' set color
+                    text.SetTextColours(param0 >> 4, param0 & $F)
+                    color := param0
+                $F3:
+                    ' fill line
+                    row, col := text.GetTextPos()
+                    col := 0
+                    wordfill(text.GetScreenBuffer + 2 * (row * text.GetCurrentColumns + col), ((color & $F) << 4) | (color & $F) | param0, text.GetCurrentColumns - col)
+            printState := 0
+        0:
+            case c
+                $EE, $F0..$F3:
+                    printMode := c
+                    printState := 1
+                $8A: return $B1
+                $FE, $FF: ' ignore
+                other: return c
+    return 0
+
+PUB Scan2Ascii(event): r | shifted, scancode
+    if event <= 0
+        return 0 ' No event or release event
+    shifted := (event.[8+1] || event.[8+5]) ^^ event.[17]
+    scancode := event & 255
+    case scancode
+        usb.KEY_A..usb.KEY_Z:
+            if shifted
+                return (scancode - usb.KEY_A) + "A"
+            else
+                return (scancode - usb.KEY_A) + "a"
+        usb.KEY_1..usb.KEY_0:
+            if shifted
+                return lookupz(scancode-usb.KEY_1 : "!","@","#","$","%","^","&","*","(",")")
+            elseif scancode == usb.KEY_0
+                return "0"
+            else
+                return (scancode - usb.KEY_1) + "1"
+        usb.KEY_MINUS:
+            ifnot shifted
+                return "-"
+            else
+                return "_"
+        usb.KEY_EQUAL:
+            ifnot shifted
+                return "="
+            else
+                return "+"
+        usb.KEY_LBRACE:
+            ifnot shifted
+                return "["
+            else
+                return "{"
+        usb.KEY_RBRACE:
+            ifnot shifted
+                return "]"
+            else
+                return "}"
+        usb.KEY_BACKSLASH:
+            ifnot shifted
+                return "\"
+            else
+                return "|"
+        usb.KEY_HASHTILDE:
+            ifnot shifted
+                return "`"
+            else
+                return "~"
+        usb.KEY_SEMICOLON:
+            ifnot shifted
+                return ";"
+            else
+                return ":"
+        usb.KEY_APOST:
+            ifnot shifted
+                return "'"
+            else
+                return 34
+        usb.KEY_GRAVE:
+            ifnot shifted
+                return "`"
+            else
+                return "~"
+        usb.KEY_COMMA:
+            ifnot shifted
+                return ","
+            else
+                return "<"
+        usb.KEY_DOT:
+            ifnot shifted
+                return "."
+            else
+                return ">"
+        usb.KEY_SLASH:
+            ifnot shifted
+                return "/"
+            else
+                return "?"
+        usb.KEY_SPACE: return " "
+        usb.KEY_BACKSPACE: return 8
+        usb.KEY_ENTER: return 10
+        usb.KEY_ESC: return 27
+        usb.KEY_NUM0: return "0"
+        usb.KEY_NUM1..usb.KEY_NUM9: return (scancode - usb.KEY_NUM1) + "1"
+        other:
+            return 0
